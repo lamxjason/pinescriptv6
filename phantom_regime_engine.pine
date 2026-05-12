@@ -1,0 +1,130 @@
+//@version=6
+indicator('Phantom Regime Engine — Test Build', 'PhantomRegime', overlay = true, max_bars_back = 500)
+
+// ============================================================
+// PHANTOM REGIME ENGINE — Standalone Test
+// ============================================================
+// Paste into TradingView Pine Editor, load on any chart, watch
+// the badge classify the market into TRENDING / RANGING /
+// BREAKOUT / DEAD as price evolves. This is the math that will
+// replace SuperTrend in Phantom Flow Pro v3.
+//
+// Method (custom, free-tier compatible, no Premium gating):
+//   1. Trend Efficiency Ratio  (Kaufman-style net/path)
+//   2. Return Autocorrelation  (Hurst-like persistence)
+//   3. Volatility-of-Vol Z     (regime-change detection)
+// ============================================================
+
+// === INPUTS ===
+regimeWindow      = input.int(50,   'Regime Window', minval = 20, maxval = 200, group = 'Regime', tooltip = '50 = balanced; 30 = reactive; 100 = stable.')
+trendThresh       = input.float(0.40, 'Trend Threshold',     minval = 0.20, maxval = 0.70, step = 0.05, group = 'Regime', tooltip = 'Efficiency above this = TRENDING.')
+deadThresh        = input.float(0.15, 'Dead Threshold',      minval = 0.05, maxval = 0.30, step = 0.05, group = 'Regime', tooltip = 'Efficiency below this = DEAD. Stand aside.')
+breakoutZ         = input.float(1.50, 'Breakout Z-Score',    minval = 0.50, maxval = 3.00, step = 0.10, group = 'Regime', tooltip = 'Volatility expansion threshold.')
+persistMin        = input.float(0.05, 'Persistence Minimum', minval = -0.20, maxval = 0.20, step = 0.01, group = 'Regime', tooltip = 'Autocorr above this confirms TRENDING.')
+
+showBadge         = input.bool(true,  'Show Regime Badge',  group = 'Display')
+colorBars         = input.bool(true,  'Color Bars by Regime', group = 'Display')
+showMetrics       = input.bool(true,  'Show Metrics Panel', group = 'Display')
+
+// === PALETTE ===
+BULL    = #00E5A0
+BEAR    = #FF5274
+ACCENT  = #3B82F6
+NEUTRAL = #64748B
+WARN    = #F59E0B
+
+// === FOUNDATIONS ===
+logRet = math.log(close / nz(close[1], close))
+
+// 1. Trend Efficiency Ratio
+netMove    = math.abs(close - nz(close[regimeWindow], close))
+pathLen    = math.sum(math.abs(ta.change(close)), regimeWindow)
+efficiency = pathLen == 0 ? 0.0 : netMove / pathLen
+
+// 2. Lagged Autocorrelation (Hurst proxy across 3 lags)
+ac1         = nz(ta.correlation(logRet, logRet[1], regimeWindow), 0.0)
+ac2         = nz(ta.correlation(logRet, logRet[2], regimeWindow), 0.0)
+ac3         = nz(ta.correlation(logRet, logRet[3], regimeWindow), 0.0)
+persistence = math.avg(ac1, ac2, ac3)
+
+// 3. Volatility-of-Volatility Z-Score
+realizedVol = ta.stdev(logRet, 20)
+vovRaw      = ta.stdev(realizedVol, 50)
+vovMean     = ta.sma(vovRaw, 200)
+vovStd      = ta.stdev(vovRaw, 200)
+vovZ        = vovStd > 0 ? (vovRaw - vovMean) / vovStd : 0.0
+
+// === CLASSIFICATION ===
+warmupBars   = 200
+regimeReady  = bar_index > warmupBars and not na(efficiency) and not na(persistence)
+
+string regime = na
+if not regimeReady
+    regime := 'INIT'
+else if vovZ > breakoutZ
+    regime := 'BREAKOUT'
+else if efficiency < deadThresh
+    regime := 'DEAD'
+else if efficiency > trendThresh and persistence > persistMin
+    regime := 'TRENDING'
+else
+    regime := 'RANGING'
+
+// === CONFIDENCE (0-100) ===
+float regimeConf = 0.0
+if regime == 'TRENDING'
+    regimeConf := math.min(100.0, (efficiency - trendThresh) * 250.0 + math.max(0.0, persistence) * 200.0)
+else if regime == 'RANGING'
+    regimeConf := math.min(100.0, (trendThresh - efficiency) * 200.0)
+else if regime == 'BREAKOUT'
+    regimeConf := math.min(100.0, (vovZ - breakoutZ) * 40.0)
+else if regime == 'DEAD'
+    regimeConf := math.min(100.0, (deadThresh - efficiency) * 600.0)
+regimeConf := math.max(0.0, regimeConf)
+
+// === DIRECTION (for trending/breakout regimes) ===
+shortMA  = ta.ema(close, 21)
+longMA   = ta.ema(close, 55)
+direction = shortMA > longMA ? 1 : shortMA < longMA ? -1 : 0
+dirText   = direction == 1 ? '▲ UP' : direction == -1 ? '▼ DOWN' : '◆ FLAT'
+
+// === REGIME METADATA ===
+regimeIcon  = regime == 'TRENDING' ? '📈' : regime == 'RANGING' ? '🌊' : regime == 'BREAKOUT' ? '⚡' : regime == 'DEAD' ? '💤' : '⏳'
+regimeColor = regime == 'TRENDING' ? (direction == 1 ? BULL : direction == -1 ? BEAR : NEUTRAL) : regime == 'RANGING' ? ACCENT : regime == 'BREAKOUT' ? WARN : regime == 'DEAD' ? NEUTRAL : NEUTRAL
+regimeText  = regime == 'TRENDING' ? 'TRENDING ' + dirText : regime == 'RANGING' ? 'RANGING' : regime == 'BREAKOUT' ? 'BREAKOUT ' + dirText : regime == 'DEAD' ? 'DEAD MARKET' : 'INITIALIZING…'
+regimeAdvice = regime == 'TRENDING' ? (direction == 1 ? 'Buy pullbacks' : 'Sell rallies') : regime == 'RANGING' ? 'Fade extremes at S/R' : regime == 'BREAKOUT' ? 'Volatility expansion — wait for retest' : regime == 'DEAD' ? 'Stand aside — no edge' : 'Gathering data…'
+
+// === BAR COLORING ===
+barColorFinal = colorBars ? color.new(regimeColor, 40) : na
+barcolor(barColorFinal)
+
+// === REGIME BADGE (top-right) ===
+var table badge = table.new(position.top_right, 1, 3, bgcolor = color.new(#0F1117, 10), border_width = 1, border_color = color.new(regimeColor, 50))
+
+if barstate.islast and showBadge
+    table.cell(badge, 0, 0, regimeIcon + '  ' + regimeText, text_color = regimeColor, text_size = size.large, bgcolor = color.new(regimeColor, 90))
+    table.cell(badge, 0, 1, 'Confidence: ' + str.tostring(regimeConf, '#') + '%', text_color = color.white, text_size = size.normal, bgcolor = color.new(#1A1D27, 0))
+    table.cell(badge, 0, 2, regimeAdvice, text_color = color.new(#94A3B8, 0), text_size = size.small, bgcolor = color.new(#1A1D27, 0))
+
+// === METRICS PANEL (bottom-left, for debugging the math) ===
+var table metrics = table.new(position.bottom_left, 2, 4, bgcolor = color.new(#0F1117, 15), border_width = 1, border_color = color.new(#1A1D27, 0))
+
+if barstate.islast and showMetrics
+    table.cell(metrics, 0, 0, 'Efficiency',  text_color = color.new(#94A3B8, 0), text_size = size.small)
+    table.cell(metrics, 1, 0, str.tostring(efficiency, '0.00'),  text_color = efficiency > trendThresh ? BULL : efficiency < deadThresh ? BEAR : NEUTRAL, text_size = size.small)
+    table.cell(metrics, 0, 1, 'Persistence', text_color = color.new(#94A3B8, 0), text_size = size.small)
+    table.cell(metrics, 1, 1, str.tostring(persistence, '0.000'), text_color = persistence > persistMin ? BULL : persistence < -persistMin ? BEAR : NEUTRAL, text_size = size.small)
+    table.cell(metrics, 0, 2, 'VoV Z',       text_color = color.new(#94A3B8, 0), text_size = size.small)
+    table.cell(metrics, 1, 2, str.tostring(vovZ, '0.00'),         text_color = vovZ > breakoutZ ? WARN : NEUTRAL, text_size = size.small)
+    table.cell(metrics, 0, 3, 'Direction',   text_color = color.new(#94A3B8, 0), text_size = size.small)
+    table.cell(metrics, 1, 3, dirText,                            text_color = direction == 1 ? BULL : direction == -1 ? BEAR : NEUTRAL, text_size = size.small)
+
+// === REGIME CHANGE MARKER ===
+regimeChanged = regime != regime[1] and regime != 'INIT' and regime[1] != 'INIT'
+plotshape(regimeChanged ? high * 1.005 : na, title = 'Regime Change', style = shape.diamond, location = location.absolute, color = regimeColor, size = size.tiny)
+
+// === ALERTS ===
+alertcondition(regimeChanged and regime == 'TRENDING', title = 'Regime → TRENDING', message = 'Phantom Regime: market entered TRENDING state. {{ticker}} on {{interval}}.')
+alertcondition(regimeChanged and regime == 'RANGING',  title = 'Regime → RANGING',  message = 'Phantom Regime: market entered RANGING state. {{ticker}} on {{interval}}.')
+alertcondition(regimeChanged and regime == 'BREAKOUT', title = 'Regime → BREAKOUT', message = 'Phantom Regime: volatility expansion detected. {{ticker}} on {{interval}}.')
+alertcondition(regimeChanged and regime == 'DEAD',     title = 'Regime → DEAD',     message = 'Phantom Regime: market entered DEAD state — stand aside. {{ticker}} on {{interval}}.')
