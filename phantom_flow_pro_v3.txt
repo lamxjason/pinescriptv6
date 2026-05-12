@@ -1,0 +1,532 @@
+//@version=6
+indicator('Phantom Flow Pro', 'Phantom Flow Pro v3', overlay = true, max_bars_back = 500, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ============================================================
+// 🌐 PHANTOM FLOW PRO v3 — REGIME-AWARE EDITION
+// ============================================================
+// © getphantomflow.com — Custom-built, free-tier compatible, 7 languages.
+//
+// What's new in v3:
+//   • Statistical Regime Engine (custom math, no ta.supertrend)
+//     - Trend Efficiency Ratio (Kaufman-style)
+//     - Lagged Return Autocorrelation (Hurst proxy)
+//     - Volatility-of-Volatility Z-Score
+//   • 4 market states: TRENDING / RANGING / BREAKOUT / DEAD
+//   • Signals fire ONLY when the regime supports them
+//   • DEAD-regime mode: indicator stands aside
+//   • Simpler, faster, cleaner than v2
+//
+// ⚠️ Trading is risky. You are responsible for your decisions.
+// ============================================================
+
+
+// ============================================================
+// 🌍 LANGUAGE
+// ============================================================
+langInput = input.string('English', '🌍 Language', group = '🌍 LANGUAGE',
+     options = ['English', 'Bahasa Indonesia', 'Português (Brasil)', 'Français', 'Deutsch', 'हिन्दी (Hindi)', '中文 (Chinese)'])
+langIdx = langInput == 'Bahasa Indonesia' ? 1 :
+         langInput == 'Português (Brasil)' ? 2 :
+         langInput == 'Français' ? 3 :
+         langInput == 'Deutsch' ? 4 :
+         langInput == 'हिन्दी (Hindi)' ? 5 :
+         langInput == '中文 (Chinese)' ? 6 : 0
+
+t(string en, string id, string pt, string fr, string de, string hi, string zh) =>
+    switch langIdx
+        1 => id
+        2 => pt
+        3 => fr
+        4 => de
+        5 => hi
+        6 => zh
+        => en
+
+
+// ============================================================
+// 🎛️ MAIN CONTROLS — Beginner-first defaults
+// ============================================================
+groupMain = '🌐 GetPhantomFlow.com'
+
+showRegime    = input.bool(true,  'Regime Badge',         group = groupMain, tooltip = 'The big call: TRENDING, RANGING, BREAKOUT, or DEAD.')
+showTrail     = input.bool(true,  'Phantom Trail',        group = groupMain, tooltip = 'Adaptive trend trail. Width and color encode regime confidence.')
+showLevels    = input.bool(true,  'Phantom Power Levels', group = groupMain, tooltip = 'Auto-detected support/resistance from lookback extremes.')
+showSweeps    = input.bool(true,  'Liquidity Sweeps',     group = groupMain, tooltip = '⚡ markers when stop hunts occur.')
+showSL        = input.bool(true,  'Smart Stop Loss',      group = groupMain, tooltip = 'Recommended stop only when a valid setup is active.')
+showSignals   = input.bool(true,  'Entry Signals',        group = groupMain, tooltip = 'BUY/SELL labels — only fire when regime supports them.')
+showDashboard = input.bool(true,  'Dashboard',            group = groupMain)
+showTips      = input.bool(true,  'Educational Tips',     group = groupMain)
+darkMode      = input.bool(true,  '🌙 Dark Mode',         group = groupMain)
+quietMode     = input.bool(false, '🧘 Quiet Mode',        group = groupMain, tooltip = 'Hide everything except regime badge + stop loss. All engines still compute.')
+showVWAP      = input.bool(false, 'VWAP Line',            group = groupMain, tooltip = 'Plot session VWAP.')
+
+dashSize = input.string('Small', 'Dashboard Size', group = groupMain, options = ['Tiny', 'Small', 'Normal', 'Large'])
+dashPos  = input.string('Top Right', 'Dashboard Position', group = groupMain, options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left', 'Middle Right'])
+
+
+// ============================================================
+// 🧠 REGIME ENGINE — Inputs
+// ============================================================
+groupRegime = '🧠 REGIME ENGINE (Advanced)'
+
+regimeWindow  = input.int(50,   'Window',           minval = 20, maxval = 200, group = groupRegime, tooltip = '50 = balanced; 30 = reactive; 100 = stable.')
+trendThresh   = input.float(0.40, 'Trend Threshold',     minval = 0.20, maxval = 0.70, step = 0.05, group = groupRegime)
+deadThresh    = input.float(0.15, 'Dead Threshold',      minval = 0.05, maxval = 0.30, step = 0.05, group = groupRegime)
+breakoutZ     = input.float(1.50, 'Breakout Z-Score',    minval = 0.50, maxval = 3.00, step = 0.10, group = groupRegime)
+persistMin    = input.float(0.05, 'Persistence Floor',   minval = -0.20, maxval = 0.20, step = 0.01, group = groupRegime)
+strictRegime  = input.bool(true,  'Suppress Signals in DEAD', group = groupRegime, tooltip = 'When ON (recommended), no BUY/SELL fires while market is DEAD.')
+
+
+// ============================================================
+// 🎯 PHANTOM TRAIL — Inputs
+// ============================================================
+groupTrail = '🎯 PHANTOM TRAIL'
+trailPeriods    = input.int(10,   'ATR Period',     minval = 1,    group = groupTrail)
+trailMult       = input.float(3.0,'ATR Multiplier', minval = 0.5, step = 0.1, group = groupTrail)
+trailUseATR     = input.bool(true,'Use ATR (vs RMA-TR)', group = groupTrail)
+
+
+// ============================================================
+// ⚡ PHANTOM POWER LEVELS — Inputs
+// ============================================================
+groupLevels = '⚡ PHANTOM POWER LEVELS'
+levelsLength = input.int(130, 'Lookback Length', minval = 20, group = groupLevels)
+levelsExtend = input.int(30,  'Extension Bars',  minval = 5,  maxval = 100, group = groupLevels)
+
+
+// ============================================================
+// 🔔 ALERTS — Inputs
+// ============================================================
+groupAlert = '🔔 ALERTS'
+alertConfirmedOnly = input.bool(true,    '✓ Confirmed Bars Only', group = groupAlert)
+alertSens          = input.string('Normal','Alert Sensitivity',    group = groupAlert, options = ['Low','Normal','High'])
+
+
+// ============================================================
+// 🎨 PHANTOM PALETTE
+// ============================================================
+BULL_D        = #00E5A0
+BULL_L        = #00B377
+BEAR_D        = #FF5274
+BEAR_L        = #E03050
+ACCENT_D      = #3B82F6
+ACCENT_L      = #2563EB
+WARN_D        = #F59E0B
+WARN_L        = #D97706
+NEUTRAL_D     = #64748B
+NEUTRAL_L     = #94A3B8
+SURFACE_D     = #0F1117
+SURFACE_L     = #FFFFFF
+SURFACE_ALT_D = #1A1D27
+SURFACE_ALT_L = #F8FAFC
+
+BULL    = darkMode ? BULL_D    : BULL_L
+BEAR    = darkMode ? BEAR_D    : BEAR_L
+ACCENT  = darkMode ? ACCENT_D  : ACCENT_L
+WARN    = darkMode ? WARN_D    : WARN_L
+NEUTRAL = darkMode ? NEUTRAL_D : NEUTRAL_L
+SURFACE = darkMode ? SURFACE_D : SURFACE_L
+SURFACE_ALT = darkMode ? SURFACE_ALT_D : SURFACE_ALT_L
+TEXT_FG = darkMode ? color.white : color.black
+TEXT_MUTED = darkMode ? color.new(#94A3B8, 0) : color.new(#475569, 0)
+
+
+// ============================================================
+// 🧠 REGIME ENGINE — Math
+// ============================================================
+logRet = math.log(close / nz(close[1], close))
+
+// 1. Trend Efficiency Ratio (Kaufman)
+netMove    = math.abs(close - nz(close[regimeWindow], close))
+pathLen    = math.sum(math.abs(ta.change(close)), regimeWindow)
+efficiency = pathLen == 0 ? 0.0 : netMove / pathLen
+
+// 2. Lagged Autocorrelation — Hurst proxy across 3 lags
+ac1         = nz(ta.correlation(logRet, logRet[1], regimeWindow), 0.0)
+ac2         = nz(ta.correlation(logRet, logRet[2], regimeWindow), 0.0)
+ac3         = nz(ta.correlation(logRet, logRet[3], regimeWindow), 0.0)
+persistence = math.avg(ac1, ac2, ac3)
+
+// 3. Volatility-of-Volatility Z-Score
+realizedVol = ta.stdev(logRet, 20)
+vovRaw      = ta.stdev(realizedVol, 50)
+vovMean     = ta.sma(vovRaw, 200)
+vovStd      = ta.stdev(vovRaw, 200)
+vovZ        = vovStd > 0 ? (vovRaw - vovMean) / vovStd : 0.0
+
+// 4. Classification
+warmupBars  = 200
+regimeReady = bar_index > warmupBars and not na(efficiency) and not na(persistence)
+
+regime = not regimeReady ? 'INIT' :
+         vovZ > breakoutZ ? 'BREAKOUT' :
+         efficiency < deadThresh ? 'DEAD' :
+         (efficiency > trendThresh and persistence > persistMin) ? 'TRENDING' :
+         'RANGING'
+
+// 5. Confidence 0-100
+regimeConf = regime == 'TRENDING' ? math.min(100.0, math.max(0.0, (efficiency - trendThresh) * 250.0 + math.max(0.0, persistence) * 200.0)) :
+             regime == 'RANGING'  ? math.min(100.0, math.max(0.0, (trendThresh - efficiency) * 200.0)) :
+             regime == 'BREAKOUT' ? math.min(100.0, math.max(0.0, (vovZ - breakoutZ) * 40.0)) :
+             regime == 'DEAD'     ? math.min(100.0, math.max(0.0, (deadThresh - efficiency) * 600.0)) :
+             0.0
+
+// 6. Direction (for trending/breakout regimes)
+shortMA   = ta.ema(close, 21)
+longMA    = ta.ema(close, 55)
+direction = shortMA > longMA ? 1 : shortMA < longMA ? -1 : 0
+
+// 7. Regime change flag
+regimeChanged = regime != regime[1] and regime != 'INIT' and regime[1] != 'INIT'
+
+
+// ============================================================
+// 🧠 REGIME ENGINE — Multi-Timeframe (replaces ta.supertrend MTF)
+// ============================================================
+// Compute the same regime engine on D and W timeframes for confluence.
+htfRegimeFn() =>
+    htfRet    = math.log(close / nz(close[1], close))
+    htfNet    = math.abs(close - nz(close[regimeWindow], close))
+    htfPath   = math.sum(math.abs(ta.change(close)), regimeWindow)
+    htfEff    = htfPath == 0 ? 0.0 : htfNet / htfPath
+    htfAc1    = nz(ta.correlation(htfRet, htfRet[1], regimeWindow), 0.0)
+    htfPers   = htfAc1
+    htfRegime = htfEff > trendThresh and htfPers > persistMin ? 1 :
+                htfEff < deadThresh ? -2 :
+                0
+    htfShort  = ta.ema(close, 21)
+    htfLong   = ta.ema(close, 55)
+    htfDir    = htfShort > htfLong ? 1 : htfShort < htfLong ? -1 : 0
+    [htfRegime, htfDir]
+
+[htfRegime_D, htfDir_D] = request.security(syminfo.tickerid, 'D', htfRegimeFn(), lookahead = barmerge.lookahead_off)
+[htfRegime_W, htfDir_W] = request.security(syminfo.tickerid, 'W', htfRegimeFn(), lookahead = barmerge.lookahead_off)
+
+htfTrendingBull = htfRegime_D == 1 and htfDir_D == 1 and htfDir_W == 1
+htfTrendingBear = htfRegime_D == 1 and htfDir_D == -1 and htfDir_W == -1
+htfAligned      = htfDir_D == htfDir_W and htfDir_D != 0
+
+
+// ============================================================
+// 🎨 REGIME METADATA — colors, icons, advice
+// ============================================================
+regimeIcon  = regime == 'TRENDING' ? '📈' :
+              regime == 'RANGING'  ? '🌊' :
+              regime == 'BREAKOUT' ? '⚡' :
+              regime == 'DEAD'     ? '💤' :
+              '⏳'
+
+regimeColor = regime == 'TRENDING' ? (direction == 1 ? BULL : direction == -1 ? BEAR : NEUTRAL) :
+              regime == 'RANGING'  ? ACCENT :
+              regime == 'BREAKOUT' ? WARN :
+              regime == 'DEAD'     ? NEUTRAL :
+              NEUTRAL
+
+dirArrow = direction == 1 ? '▲' : direction == -1 ? '▼' : '◆'
+
+regimeLabel = regime == 'TRENDING' ? t('TRENDING','TREN NAIK','TENDÊNCIA','TENDANCE','TREND','ट्रेंडिंग','趋势') :
+              regime == 'RANGING'  ? t('RANGING','BERKISAR','LATERAL','LATÉRAL','SEITWÄRTS','रेंजिंग','区间') :
+              regime == 'BREAKOUT' ? t('BREAKOUT','TEROBOSAN','ROMPIMENTO','CASSURE','AUSBRUCH','ब्रेकआउट','突破') :
+              regime == 'DEAD'     ? t('DEAD MARKET','PASAR MATI','MERCADO MORTO','MARCHÉ MORT','TOT','मृत बाज़ार','死寂') :
+              t('INITIALIZING','MEMUAT','CARREGANDO','CHARGEMENT','LADEN','लोड हो रहा','加载中')
+
+regimeAdvice = regime == 'TRENDING' ? (direction == 1 ?
+                  t('Buy pullbacks','Beli koreksi','Compre correções','Acheter les replis','Rücksetzer kaufen','गिरावट पर खरीदें','回调买入') :
+                  t('Sell rallies','Jual rally','Venda repiques','Vendre les rebonds','Anstiege verkaufen','उछाल पर बेचें','反弹卖出')) :
+              regime == 'RANGING'  ? t('Fade extremes','Lawan ekstrem','Operar extremos','Contrer les extrêmes','Extrema handeln','चरम पर रिवर्स','极值反向') :
+              regime == 'BREAKOUT' ? t('Wait for retest','Tunggu retes','Espere reteste','Attendre le retest','Auf Retest warten','रीटेस्ट का इंतज़ार','等待回测') :
+              regime == 'DEAD'     ? t('Stand aside','Berdiri','Fique de fora','Restez à l\'écart','Abwarten','दूर रहें','观望') :
+              t('Gathering data…','Mengumpulkan data…','Coletando dados…','Collecte de données…','Daten sammeln…','डेटा एकत्र…','收集数据…')
+
+
+// ============================================================
+// 🎯 PHANTOM TRAIL — Regime-aware (no ta.supertrend)
+// ============================================================
+trailATR_basic = ta.sma(ta.tr, trailPeriods)
+trailATR_native = ta.atr(trailPeriods)
+trailATR = trailUseATR ? trailATR_native : trailATR_basic
+
+// Regime-adaptive multiplier: wider in trends, tighter in ranges, hidden in dead
+regimeMultAdj = regime == 'TRENDING' ? trailMult :
+                regime == 'BREAKOUT' ? trailMult * 1.3 :
+                regime == 'RANGING'  ? trailMult * 0.7 :
+                trailMult
+
+upStop   = close - trailATR * regimeMultAdj
+downStop = close + trailATR * regimeMultAdj
+
+var float trailLine = na
+var int   trailDir  = 1
+
+trailLine := na(trailLine[1]) ? upStop :
+             trailDir[1] == 1 ?
+                 (close > trailLine[1] ? math.max(upStop, trailLine[1]) : upStop) :
+                 (close < trailLine[1] ? math.min(downStop, trailLine[1]) : downStop)
+
+trailDir := na(trailLine[1]) ? 1 :
+            trailDir[1] == 1 and close < trailLine[1] ? -1 :
+            trailDir[1] == -1 and close > trailLine[1] ? 1 :
+            trailDir[1]
+
+trailFlip = trailDir != trailDir[1] and not na(trailDir[1])
+trailBuyFlip  = trailFlip and trailDir == 1
+trailSellFlip = trailFlip and trailDir == -1
+
+
+// ============================================================
+// ⚡ PHANTOM POWER LEVELS — Simplified
+// ============================================================
+var float lvlResistance = na
+var float lvlSupport    = na
+var line  lvlResLine    = na
+var line  lvlSupLine    = na
+var label lvlResLabel   = na
+var label lvlSupLabel   = na
+
+if barstate.islast and showLevels and not quietMode
+    highSeg = ta.highest(high, levelsLength)
+    lowSeg  = ta.lowest(low,  levelsLength)
+    lvlResistance := highSeg
+    lvlSupport    := lowSeg
+
+    line.delete(lvlResLine)
+    line.delete(lvlSupLine)
+    label.delete(lvlResLabel)
+    label.delete(lvlSupLabel)
+
+    lvlResLine := line.new(bar_index - levelsLength, lvlResistance, bar_index + levelsExtend, lvlResistance,
+                            color = color.new(BEAR, 30), width = 1, style = line.style_dotted)
+    lvlSupLine := line.new(bar_index - levelsLength, lvlSupport, bar_index + levelsExtend, lvlSupport,
+                            color = color.new(BULL, 30), width = 1, style = line.style_dotted)
+
+    lvlResLabel := label.new(bar_index + levelsExtend, lvlResistance, str.tostring(lvlResistance, format.mintick) + ' R',
+                              color = color(na), style = label.style_label_left, textcolor = BEAR, size = size.small)
+    lvlSupLabel := label.new(bar_index + levelsExtend, lvlSupport, str.tostring(lvlSupport, format.mintick) + ' S',
+                              color = color(na), style = label.style_label_left, textcolor = BULL, size = size.small)
+
+
+// ============================================================
+// 🔻 LIQUIDITY SWEEP DETECTION
+// ============================================================
+sweepATR_v = ta.atr(14)
+sweepWickThreshold = sweepATR_v * 0.10
+
+sweepHigh = high > nz(high[1]) and (high - math.max(open, close)) > sweepWickThreshold and close < open
+sweepLow  = low  < nz(low[1])  and (math.min(open, close) - low) > sweepWickThreshold and close > open
+
+var int lastSweepBar = -100
+sweepValid = (sweepHigh or sweepLow) and (bar_index - lastSweepBar) > 5
+if sweepValid
+    lastSweepBar := bar_index
+
+
+// ============================================================
+// 📊 VOLUME / VWAP — silent metrics (feed dashboard tips)
+// ============================================================
+avgVol     = ta.sma(volume, 20)
+volRatio   = avgVol > 0 ? volume / avgVol : 1.0
+volHigh    = volRatio > 1.5
+volLow     = volRatio < 0.6
+vwapValue  = ta.vwap(hlc3)
+aboveVWAP  = close > vwapValue
+
+
+// ============================================================
+// 🎯 ENTRY SIGNAL LOGIC — Gated by regime
+// ============================================================
+// A signal only fires if:
+//   1. The regime supports it (no signals in DEAD when strictRegime=on)
+//   2. The trail flips (or equivalent regime-specific trigger)
+//   3. HTF direction is at least neutral (not opposing)
+
+baseSignalGate = strictRegime ? regime != 'DEAD' and regime != 'INIT' : regime != 'INIT'
+
+buyTrigger  = trailBuyFlip and baseSignalGate and (regime == 'TRENDING' ? direction == 1 : true) and htfDir_D != -1
+sellTrigger = trailSellFlip and baseSignalGate and (regime == 'TRENDING' ? direction == -1 : true) and htfDir_D != 1
+
+// Confluence score (0-4) for signal strength
+confluenceCount = (regime == 'TRENDING' ? 1 : 0) +
+                  (htfAligned ? 1 : 0) +
+                  (volHigh ? 1 : 0) +
+                  ((buyTrigger and aboveVWAP) or (sellTrigger and not aboveVWAP) ? 1 : 0)
+
+
+// ============================================================
+// 🎯 SMART STOP LOSS — Only when valid setup is active
+// ============================================================
+var float smartSLPrice = na
+var int   smartSLBar   = na
+
+if buyTrigger and showSL
+    smartSLPrice := low - trailATR * 0.5
+    smartSLBar   := bar_index
+else if sellTrigger and showSL
+    smartSLPrice := high + trailATR * 0.5
+    smartSLBar   := bar_index
+
+smartSLActive = not na(smartSLBar) and (bar_index - smartSLBar) < 30
+
+
+// ============================================================
+// 🌅 VISUAL LAYER — gated by quietMode
+// ============================================================
+trailVisible = showTrail and not quietMode
+trailPlotColor = trailDir == 1 ? color.new(BULL, 100 - math.round(regimeConf * 0.6)) :
+                 trailDir == -1 ? color.new(BEAR, 100 - math.round(regimeConf * 0.6)) :
+                 color.new(NEUTRAL, 50)
+
+plot(trailVisible ? trailLine : na, title = 'Phantom Trail', color = trailPlotColor, linewidth = 2, style = plot.style_line)
+
+// Entry signal labels
+plotshape(showSignals and not quietMode and buyTrigger ?  low  - trailATR * 0.3 : na, title = 'BUY',  style = shape.labelup,   location = location.absolute, color = color.new(BULL, 20), textcolor = color.white, text = '▲ BUY',  size = size.tiny)
+plotshape(showSignals and not quietMode and sellTrigger ? high + trailATR * 0.3 : na, title = 'SELL', style = shape.labeldown, location = location.absolute, color = color.new(BEAR, 20), textcolor = color.white, text = '▼ SELL', size = size.tiny)
+
+// Sweep markers
+plotshape(showSweeps and not quietMode and sweepValid and sweepHigh ? high * 1.001 : na, title = 'Sweep High', style = shape.labeldown, location = location.absolute, color = color.new(WARN, 30), textcolor = color.white, text = '⚡', size = size.tiny)
+plotshape(showSweeps and not quietMode and sweepValid and sweepLow  ? low  * 0.999 : na, title = 'Sweep Low',  style = shape.labelup,   location = location.absolute, color = color.new(WARN, 30), textcolor = color.white, text = '⚡', size = size.tiny)
+
+// VWAP line (optional, hidden by default)
+plot(showVWAP and not quietMode ? vwapValue : na, title = 'VWAP', color = color.new(ACCENT, 30), linewidth = 1)
+
+// Regime-change marker on the chart edge
+plotshape(regimeChanged ? high * 1.005 : na, title = 'Regime Change', style = shape.diamond, location = location.absolute, color = regimeColor, size = size.tiny)
+
+// Smart SL line
+var line slLine = na
+var label slLabel = na
+if smartSLActive
+    line.delete(slLine)
+    label.delete(slLabel)
+    slLine := line.new(smartSLBar, smartSLPrice, bar_index + 5, smartSLPrice, color = color.new(WARN, 30), width = 1, style = line.style_dashed)
+    slLabel := label.new(bar_index + 5, smartSLPrice, t('SL ','SL ','SL ','SL ','SL ','SL ','SL ') + str.tostring(smartSLPrice, format.mintick),
+                          color = color(na), style = label.style_label_left, textcolor = WARN, size = size.small)
+
+
+// ============================================================
+// 📊 DASHBOARD
+// ============================================================
+getDashSize(string s) =>
+    s == 'Tiny'   ? size.tiny :
+    s == 'Small'  ? size.small :
+    s == 'Normal' ? size.normal :
+    s == 'Large'  ? size.large : size.small
+
+getDashPos(string p) =>
+    p == 'Top Right'     ? position.top_right :
+    p == 'Top Left'      ? position.top_left :
+    p == 'Bottom Right'  ? position.bottom_right :
+    p == 'Bottom Left'   ? position.bottom_left :
+    p == 'Middle Right'  ? position.middle_right : position.top_right
+
+dashTextSize = getDashSize(dashSize)
+dashPosition = getDashPos(dashPos)
+
+// Dashboard rows (regime-first layout)
+// Row 0: Brand
+// Row 1: REGIME BADGE (big)
+// Row 2: Confidence
+// Row 3: Advice
+// Row 4: HTF Alignment
+// Row 5: Signal status
+// Row 6: Volatility
+// Row 7: Tip (rotating)
+
+dashRows = 8
+var table dash = table.new(dashPosition, 2, dashRows, bgcolor = color.new(SURFACE, 5), border_width = 1, border_color = color.new(regimeColor, 60))
+
+// Status text strings (per language)
+str_brand     = 'Phantom Flow Pro v3'
+str_regime    = t('Regime','Rezim','Regime','Régime','Regime','रेजीम','状态')
+str_conf      = t('Confidence','Kepercayaan','Confiança','Confiance','Vertrauen','विश्वास','置信度')
+str_action    = t('Action','Tindakan','Ação','Action','Aktion','कार्रवाई','操作')
+str_htf       = t('HTF','HTF','HTF','HTF','HTF','HTF','高时框')
+str_signal    = t('Signal','Sinyal','Sinal','Signal','Signal','सिग्नल','信号')
+str_volatil   = t('Volatility','Volatilitas','Volatilidade','Volatilité','Volatilität','अस्थिरता','波动')
+str_tip       = t('Tip','Tips','Dica','Astuce','Tipp','सुझाव','提示')
+
+// HTF alignment text
+htfText = htfTrendingBull ? '▲ ' + t('Bullish aligned','Bullish selaras','Alta alinhada','Haussier aligné','Bullisch aligned','तेज़ी अलाइन','看涨对齐') :
+          htfTrendingBear ? '▼ ' + t('Bearish aligned','Bearish selaras','Baixa alinhada','Baissier aligné','Bärisch aligned','मंदी अलाइन','看跌对齐') :
+          htfAligned ? '◆ ' + t('Mixed','Campuran','Misto','Mixte','Gemischt','मिश्रित','混合') :
+          '◇ ' + t('No HTF alignment','Tidak selaras','Sem alinhamento','Pas d\'alignement','Keine HTF-Übereinstimmung','कोई HTF अलाइन नहीं','无对齐')
+
+// Signal status text
+signalText = buyTrigger ? '▲ BUY (' + str.tostring(confluenceCount) + '/4)' :
+             sellTrigger ? '▼ SELL (' + str.tostring(confluenceCount) + '/4)' :
+             regime == 'DEAD' ? t('Standing aside','Berdiri','Fora','À l\'écart','Abwartend','दूर','观望') :
+             t('Waiting','Menunggu','Aguardando','En attente','Wartend','प्रतीक्षारत','等待')
+
+// Volatility text
+volText = volHigh ? t('High','Tinggi','Alta','Élevée','Hoch','उच्च','高') :
+          volLow  ? t('Low','Rendah','Baixa','Faible','Niedrig','कम','低') :
+          t('Normal','Normal','Normal','Normale','Normal','सामान्य','正常')
+
+// Tip rotation by regime
+tip = regime == 'TRENDING' ? (direction == 1 ?
+        t('Wait for shallow pullbacks. Don\'t chase tops.','Tunggu koreksi dangkal. Jangan kejar puncak.','Aguarde correções rasas. Não persiga topos.','Attendez les replis peu profonds.','Auf flache Rücksetzer warten.','उथली गिरावट का इंतज़ार करें।','等待浅回调，不要追高') :
+        t('Wait for shallow bounces. Don\'t chase bottoms.','Tunggu rebound dangkal. Jangan kejar dasar.','Aguarde repiques rasos. Não persiga fundos.','Attendez les rebonds peu profonds.','Auf flache Bounces warten.','उथली उछाल का इंतज़ार करें।','等待浅反弹，不要抄底')) :
+      regime == 'RANGING'  ? t('Buy support, sell resistance. No chasing.','Beli support, jual resistance.','Compre suporte, venda resistência.','Acheter au support, vendre à la résistance.','Bei Support kaufen, bei Widerstand verkaufen.','सपोर्ट पर खरीदें, रेजिस्टेंस पर बेचें।','支撑买，阻力卖') :
+      regime == 'BREAKOUT' ? t('Wait for retest. Avoid FOMO entries.','Tunggu retes. Hindari FOMO.','Espere o reteste. Evite FOMO.','Attendez le retest. Évitez la FOMO.','Auf Retest warten. FOMO vermeiden.','रीटेस्ट का इंतज़ार करें। FOMO से बचें।','等待回测，避免FOMO') :
+      regime == 'DEAD'     ? t('No edge right now. Save your capital.','Tidak ada peluang. Simpan modal.','Sem oportunidades. Preserve capital.','Aucun avantage. Préservez le capital.','Kein Edge. Kapital schützen.','कोई एज नहीं। पूंजी बचाएं।','无优势，保护本金') :
+      t('Gathering data…','Mengumpulkan data…','Coletando dados…','Collecte…','Sammeln…','डेटा एकत्र…','收集中…')
+
+if barstate.islast and showDashboard and not quietMode
+    table.cell(dash, 0, 0, str_brand, text_color = TEXT_FG,    text_size = size.small, bgcolor = color.new(regimeColor, 70))
+    table.cell(dash, 1, 0, regimeIcon,  text_color = regimeColor, text_size = dashTextSize, bgcolor = color.new(regimeColor, 70))
+
+    table.cell(dash, 0, 1, str_regime,  text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 1, regimeLabel + ' ' + dirArrow, text_color = regimeColor, text_size = dashTextSize)
+
+    table.cell(dash, 0, 2, str_conf,    text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 2, str.tostring(regimeConf, '#') + '%', text_color = TEXT_FG, text_size = dashTextSize)
+
+    table.cell(dash, 0, 3, str_action,  text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 3, regimeAdvice, text_color = TEXT_FG, text_size = dashTextSize)
+
+    table.cell(dash, 0, 4, str_htf,     text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 4, htfText,     text_color = htfAligned ? (htfDir_D == 1 ? BULL : BEAR) : NEUTRAL, text_size = dashTextSize)
+
+    table.cell(dash, 0, 5, str_signal,  text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 5, signalText,  text_color = buyTrigger ? BULL : sellTrigger ? BEAR : TEXT_FG, text_size = dashTextSize)
+
+    table.cell(dash, 0, 6, str_volatil, text_color = TEXT_MUTED, text_size = dashTextSize)
+    table.cell(dash, 1, 6, volText,     text_color = volHigh ? WARN : volLow ? NEUTRAL : TEXT_FG, text_size = dashTextSize)
+
+    if showTips
+        table.cell(dash, 0, 7, str_tip,  text_color = TEXT_MUTED, text_size = size.tiny)
+        table.cell(dash, 1, 7, tip,      text_color = TEXT_FG,    text_size = size.tiny)
+
+
+// ============================================================
+// 🧘 QUIET MODE — minimal dashboard (just the regime badge)
+// ============================================================
+var table quietBadge = table.new(dashPosition, 1, 2, bgcolor = color.new(SURFACE, 10), border_width = 1, border_color = color.new(regimeColor, 50))
+
+if barstate.islast and quietMode
+    table.cell(quietBadge, 0, 0, regimeIcon + '  ' + regimeLabel + ' ' + dirArrow, text_color = regimeColor, text_size = size.large, bgcolor = color.new(regimeColor, 85))
+    table.cell(quietBadge, 0, 1, regimeAdvice, text_color = TEXT_MUTED, text_size = size.small)
+
+
+// ============================================================
+// 🔔 ALERTS
+// ============================================================
+alertGate = alertConfirmedOnly ? barstate.isconfirmed : true
+sensFactor = alertSens == 'Low' ? 2 : alertSens == 'High' ? 1 : 1
+buyAlertActive  = buyTrigger  and alertGate and confluenceCount >= sensFactor
+sellAlertActive = sellTrigger and alertGate and confluenceCount >= sensFactor
+
+alertcondition(buyAlertActive,  title = 'Phantom Flow: BUY',  message = 'Phantom Flow BUY signal on {{ticker}} ({{interval}}). Regime supports it.')
+alertcondition(sellAlertActive, title = 'Phantom Flow: SELL', message = 'Phantom Flow SELL signal on {{ticker}} ({{interval}}). Regime supports it.')
+
+alertcondition(regimeChanged and regime == 'TRENDING', title = 'Regime → TRENDING', message = 'Phantom Regime: TRENDING state. {{ticker}} {{interval}}.')
+alertcondition(regimeChanged and regime == 'RANGING',  title = 'Regime → RANGING',  message = 'Phantom Regime: RANGING state. {{ticker}} {{interval}}.')
+alertcondition(regimeChanged and regime == 'BREAKOUT', title = 'Regime → BREAKOUT', message = 'Phantom Regime: volatility expansion. {{ticker}} {{interval}}.')
+alertcondition(regimeChanged and regime == 'DEAD',     title = 'Regime → DEAD',     message = 'Phantom Regime: DEAD market — stand aside. {{ticker}} {{interval}}.')
+
+alertcondition(sweepValid and sweepHigh, title = 'Liquidity Sweep ↑', message = 'Phantom Flow: liquidity sweep at highs. {{ticker}} {{interval}}.')
+alertcondition(sweepValid and sweepLow,  title = 'Liquidity Sweep ↓', message = 'Phantom Flow: liquidity sweep at lows. {{ticker}} {{interval}}.')
+
+
+// ============================================================
+// END — Phantom Flow Pro v3
+// ============================================================
